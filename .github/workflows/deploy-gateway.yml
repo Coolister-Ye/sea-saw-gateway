@@ -113,7 +113,12 @@ jobs:
           TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
           DOCKER_REGISTRY: ${{ env.DOCKER_REGISTRY }}
         run: |
-          ssh -o ConnectTimeout=30 ${SERVER_USER}@${SERVER_IP} bash << 'ENDSSH'
+          ssh -o ConnectTimeout=30 ${SERVER_USER}@${SERVER_IP} \
+            DEPLOY_PATH="${DEPLOY_PATH}" \
+            TCR_USERNAME="${TCR_USERNAME}" \
+            TCR_PASSWORD="${TCR_PASSWORD}" \
+            DOCKER_REGISTRY="${DOCKER_REGISTRY}" \
+            bash << 'ENDSSH'
             set -e
             cd ${DEPLOY_PATH}
 
