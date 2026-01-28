@@ -1,0 +1,201 @@
+name: Deploy Sea-Saw Gateway
+
+on:
+  push:
+    branches:
+      - main
+      - production
+  workflow_dispatch:
+
+env:
+  DOCKER_REGISTRY: hkccr.ccs.tencentyun.com
+  IMAGE_NAMESPACE: sea-saw
+  IMAGE_NAME: gateway
+
+jobs:
+  build-and-push:
+    name: Build and Push Gateway Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Tencent Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.TENCENT_SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        env:
+          SERVER_IP: ${{ secrets.TENCENT_SERVER_IP }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${SERVER_IP} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Test SSH connection
+        env:
+          SERVER_IP: ${{ secrets.TENCENT_SERVER_IP }}
+          SERVER_USER: ${{ secrets.TENCENT_SERVER_USER }}
+        run: |
+          ssh -o ConnectTimeout=10 ${SERVER_USER}@${SERVER_IP} "echo 'SSH connection successful'"
+
+      - name: Copy deployment files
+        env:
+          SERVER_IP: ${{ secrets.TENCENT_SERVER_IP }}
+          SERVER_USER: ${{ secrets.TENCENT_SERVER_USER }}
+          DEPLOY_PATH: ${{ secrets.GATEWAY_DEPLOY_PATH }}
+        run: |
+          echo "📦 Copying deployment files to server..."
+
+          # Copy docker-compose and configs
+          scp docker-compose.yml ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/
+          scp deploy.sh ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/
+          ssh ${SERVER_USER}@${SERVER_IP} "chmod +x ${DEPLOY_PATH}/deploy.sh"
+
+          # Copy nginx config
+          scp nginx.conf ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/
+
+          # Copy config examples if they don't exist
+          ssh ${SERVER_USER}@${SERVER_IP} "mkdir -p ${DEPLOY_PATH}/config"
+          scp config/*.example ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/config/
+
+          echo "✅ Files copied successfully"
+
+      - name: Deploy gateway
+        env:
+          SERVER_IP: ${{ secrets.TENCENT_SERVER_IP }}
+          SERVER_USER: ${{ secrets.TENCENT_SERVER_USER }}
+          DEPLOY_PATH: ${{ secrets.GATEWAY_DEPLOY_PATH }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          DOCKER_REGISTRY: ${{ env.DOCKER_REGISTRY }}
+        run: |
+          ssh -o ConnectTimeout=30 ${SERVER_USER}@${SERVER_IP} bash << 'ENDSSH'
+            set -e
+            cd ${DEPLOY_PATH}
+
+            echo "🚀 Deploying gateway..."
+
+            # Login to registry
+            echo "🔐 Logging in to registry..."
+            echo "${TCR_PASSWORD}" | docker login ${DOCKER_REGISTRY} -u "${TCR_USERNAME}" --password-stdin
+
+            # Pull latest images
+            echo "📥 Pulling latest gateway image..."
+            docker compose pull gateway
+
+            # Restart gateway only (don't touch other services)
+            echo "🔄 Restarting gateway..."
+            docker compose up -d gateway
+
+            # Wait for health check
+            echo "⏳ Waiting for gateway to be healthy..."
+            sleep 15
+
+            # Check status
+            echo "🏥 Checking gateway health..."
+            docker compose ps gateway
+
+            echo "✅ Gateway deployment completed!"
+          ENDSSH
+
+      - name: Health check
+        env:
+          SERVER_IP: ${{ secrets.TENCENT_SERVER_IP }}
+        run: |
+          echo "🏥 Performing health check..."
+          max_retries=5
+          retry_count=0
+
+          until curl -f http://${SERVER_IP}/health/ || [ $retry_count -eq $max_retries ]; do
+            echo "⏳ Waiting for service... ($retry_count/$max_retries)"
+            retry_count=$((retry_count + 1))
+            sleep 10
+          done
+
+          if [ $retry_count -eq $max_retries ]; then
+            echo "❌ Health check failed!"
+            exit 1
+          fi
+
+          echo "✅ Service is healthy!"
+
+  notify:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy]
+    if: always()
+
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.build-and-push.result }}" == "failure" ]; then
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=❌ Gateway 镜像构建失败" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=✅ Gateway 部署成功" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=❌ Gateway 部署失败" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send notification
+        env:
+          WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
+          SERVER_IP: ${{ secrets.TENCENT_SERVER_IP }}
+        run: |
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -X POST "$WEBHOOK_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"msgtype\": \"markdown\",
+                \"markdown\": {
+                  \"content\": \"## ${{ steps.status.outputs.message }}\n\n**项目**: Sea-Saw Gateway\n**分支**: ${{ github.ref_name }}\n**提交**: \`${{ github.sha }}\`\n**提交者**: ${{ github.actor }}\n**时间**: $(date '+%Y-%m-%d %H:%M:%S')\n**访问**: http://${SERVER_IP}\n\n[查看详情](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\"
+                }
+              }"
+          fi

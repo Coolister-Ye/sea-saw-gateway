@@ -1,0 +1,30 @@
+# Environment files (contain sensitive data)
+config/backend.env
+config/postgres.env
+
+# Backup files
+backups/
+*.sql
+*.sql.gz
+
+# Docker volumes
+volumes/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak

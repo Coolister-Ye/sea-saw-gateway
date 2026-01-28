@@ -1,0 +1,209 @@
+# Sea-Saw CRM Gateway - Unified Deployment Orchestration
+#
+# This compose file orchestrates three independent services:
+# 1. Frontend (sea-saw-app) - Built and pushed by sea-saw-app CI/CD
+# 2. Backend (sea-saw-server) - Built and pushed by sea-saw-server CI/CD
+# 3. Gateway (this repo) - Built and pushed by this repo's CI/CD
+#
+# Each service is maintained in its own Git repository and can be
+# deployed independently.
+
+version: '3.8'
+
+services:
+  # =============================================
+  # Backend Services (from sea-saw-server repo)
+  # =============================================
+
+  backend:
+    image: hkccr.ccs.tencentyun.com/sea-saw/backend:latest
+    container_name: sea-saw-backend
+    command: /home/app/sh/start.sh
+    volumes:
+      - backend_static:/home/app/web/staticfiles
+      - backend_media:/home/app/web/mediafiles
+    expose:
+      - 8000
+    env_file:
+      - ./config/backend.env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  db:
+    image: postgres:15
+    container_name: sea-saw-db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - ./config/postgres.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  redis:
+    image: redis:alpine
+    container_name: sea-saw-redis
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  celery_worker:
+    image: hkccr.ccs.tencentyun.com/sea-saw/backend:latest
+    container_name: sea-saw-celery-worker
+    command: /home/app/sh/start-celeryworker.sh
+    volumes:
+      - backend_static:/home/app/web/staticfiles
+      - backend_media:/home/app/web/mediafiles
+    env_file:
+      - ./config/backend.env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A sea_saw_server inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  celery_beat:
+    image: hkccr.ccs.tencentyun.com/sea-saw/backend:latest
+    container_name: sea-saw-celery-beat
+    command: /home/app/sh/start-celerybeat.sh
+    volumes:
+      - backend_static:/home/app/web/staticfiles
+      - backend_media:/home/app/web/mediafiles
+    env_file:
+      - ./config/backend.env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  flower:
+    image: hkccr.ccs.tencentyun.com/sea-saw/backend:latest
+    container_name: sea-saw-flower
+    command: /home/app/sh/start-flower.sh
+    env_file:
+      - ./config/backend.env
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  # =============================================
+  # Frontend Service (from sea-saw-app repo)
+  # =============================================
+
+  frontend:
+    image: hkccr.ccs.tencentyun.com/sea-saw/frontend:latest
+    container_name: sea-saw-frontend
+    volumes:
+      - frontend_static:/usr/share/nginx/html:ro
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+  # =============================================
+  # Gateway Service (this repo)
+  # =============================================
+
+  gateway:
+    image: hkccr.ccs.tencentyun.com/sea-saw/gateway:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sea-saw-gateway
+    volumes:
+      # Backend static and media files
+      - backend_static:/home/app/web/staticfiles:ro
+      - backend_media:/home/app/web/mediafiles:ro
+      # Frontend static files
+      - frontend_static:/usr/share/nginx/html:ro
+    ports:
+      - "80:80"
+      # - "443:443"  # Uncomment for SSL
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - sea-saw-network
+
+# =============================================
+# Volumes
+# =============================================
+
+volumes:
+  postgres_data:
+    name: sea-saw-postgres-data
+  redis_data:
+    name: sea-saw-redis-data
+  backend_static:
+    name: sea-saw-backend-static
+  backend_media:
+    name: sea-saw-backend-media
+  frontend_static:
+    name: sea-saw-frontend-static
+
+# =============================================
+# Networks
+# =============================================
+
+networks:
+  sea-saw-network:
+    name: sea-saw-network
+    driver: bridge
