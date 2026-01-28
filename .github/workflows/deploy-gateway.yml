@@ -90,17 +90,9 @@ jobs:
         run: |
           echo "📦 Copying deployment files to server..."
 
-          # Copy docker-compose and configs
+          # Copy docker-compose and nginx config
           scp docker-compose.yml ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/
-          scp deploy.sh ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/
-          ssh ${SERVER_USER}@${SERVER_IP} "chmod +x ${DEPLOY_PATH}/deploy.sh"
-
-          # Copy nginx config
           scp nginx.conf ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/
-
-          # Copy config examples if they don't exist
-          ssh ${SERVER_USER}@${SERVER_IP} "mkdir -p ${DEPLOY_PATH}/config"
-          scp config/*.example ${SERVER_USER}@${SERVER_IP}:${DEPLOY_PATH}/config/
 
           echo "✅ Files copied successfully"
 

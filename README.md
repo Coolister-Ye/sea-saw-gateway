@@ -1,6 +1,6 @@
 # Sea-Saw CRM Gateway
 
-统一部署网关，为 Sea-Saw CRM 系统提供前后端统一入口。
+**纯反向代理网关**，为 Sea-Saw CRM 系统提供统一入口。
 
 ## 🏗️ 架构说明
 
@@ -13,16 +13,39 @@ GitHub 仓库架构:
 └── sea-saw-gateway     网关仓库 (Nginx) ← 当前仓库
 ```
 
+### 核心原则：纯反向代理
+
+```
+┌─────────────────────────────────────────────────────┐
+│              sea-saw-gateway                        │
+│         (ONLY Nginx Reverse Proxy)                  │
+│                    :80                              │
+└─────────────┬───────────────────┬───────────────────┘
+              │                   │
+        /api/, /admin/        所有其他请求
+        /static/, /media/        │
+              │                   │
+              ▼                   ▼
+    ┌──────────────────┐  ┌─────────────────┐
+    │ sea-saw-backend  │  │ sea-saw-frontend│
+    │  (独立部署)      │  │  (独立部署)     │
+    │      :8000       │  │      :80        │
+    └──────────────────┘  └─────────────────┘
+
+所有服务通过共享 Docker network 互联：sea-saw-network
+```
+
 ### 服务器部署结构
 
 ```
-/home/sea-saw/
-├── sea-saw-app/        从 sea-saw-app 仓库克隆
-├── sea-saw-server/     从 sea-saw-server 仓库克隆
-└── sea-saw-gateway/    从 sea-saw-gateway 仓库克隆 (编排层)
-    ├── docker-compose.yml   编排所有服务
-    ├── nginx.conf           路由配置
-    └── deploy.sh            部署脚本
+~/sea-saw/
+├── backend/            sea-saw-server 独立部署
+│   └── docker-compose.prod.yml  (backend, db, redis, celery)
+├── frontend/           sea-saw-app 独立部署
+│   └── docker-compose.yml       (frontend only)
+└── gateway/            sea-saw-gateway 独立部署
+    ├── docker-compose.yml       (nginx only)
+    └── nginx.conf               (routing config)
 ```
 
 ### 流量路由
@@ -30,12 +53,12 @@ GitHub 仓库架构:
 ```
 Internet (80/443)
        ↓
-   Gateway Nginx
-   ├── /              → Frontend (React Native Web)
-   ├── /api/          → Backend Django
-   ├── /admin/        → Django Admin
-   ├── /static/       → Django Static Files
-   └── /media/        → User Uploads
+   Gateway Nginx (sea-saw-gateway)
+   ├── /              → proxy_pass http://sea-saw-frontend/
+   ├── /api/          → proxy_pass http://sea-saw-backend:8000/
+   ├── /admin/        → proxy_pass http://sea-saw-backend:8000/
+   ├── /static/       → volume mount (backend static)
+   └── /media/        → volume mount (backend media)
 ```
 
 ## 🚀 快速开始
